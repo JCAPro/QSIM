@@ -1,3 +1,4 @@
+import asyncio
 import os
 import random
 import sqlite3
@@ -27,10 +28,10 @@ GLYPHS: Final[list[tuple[str, str]]] = [
     ("M35 Mako", "<:M35Mako:1519922319009775626>"),
 ]
 
-RESULTS: Final[dict[int, tuple[str, str]]] = {
-    3: ("Quantum Convergence", "Three matching Simulation Glyphs."),
-    2: ("Partial Synchronization", "Any two matching Simulation Glyphs."),
-    1: ("Null Reading", "No matching Simulation Glyphs."),
+RESULTS: Final[dict[int, tuple[str, str, str]]] = {
+    3: ("Quantum Convergence", "Three matching Simulation Glyphs.", "Probability spike confirmed. Champion-grade result archived."),
+    2: ("Partial Synchronization", "Any two matching Simulation Glyphs.", "Minor probability alignment detected."),
+    1: ("Null Reading", "No matching Simulation Glyphs.", "No convergence detected. Data still preserved."),
 }
 
 intents = discord.Intents.default()
@@ -107,6 +108,10 @@ def roll_glyphs() -> list[tuple[str, str]]:
     return [random.choice(GLYPHS) for _ in range(3)]
 
 
+def spinning_line() -> str:
+    return "   ".join(random.choice(GLYPHS)[1] for _ in range(3))
+
+
 def ensure_player(guild_id: int, user_id: int, display_name: str) -> sqlite3.Row:
     week = current_week()
     now = datetime.now(timezone.utc).isoformat()
@@ -174,13 +179,31 @@ def save_roll(guild_id: int, user_id: int, display_name: str, glyphs: list[tuple
         """, (week, guild_id, user_id)).fetchone()
 
 
+def terminal_embed(member: discord.Member | discord.User, stage: str, line: str, progress: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="QUASAR SIMULATION",
+        description=(
+            "━━━━━━━━━━━━━━━━━━\n"
+            "**V.E.R.A. Quantum Probability Simulator**\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"**Crew Member:** {member.mention}\n"
+            f"**Status:** {stage}\n\n"
+            f"## {line}\n\n"
+            f"`{progress}`"
+        ),
+        color=0x2F80ED
+    )
+    embed.set_footer(text="Synchronizing probability matrix...")
+    return embed
+
+
 def build_quasar_embed(
     member: discord.Member | discord.User,
     glyphs: list[tuple[str, str]],
     result_index: int,
     player_row: sqlite3.Row,
 ) -> discord.Embed:
-    result_name, result_desc = RESULTS[result_index]
+    result_name, result_desc, flavor = RESULTS[result_index]
     attempts_used = int(player_row["attempts_used"])
     remaining = MAX_WEEKLY_ATTEMPTS - attempts_used
     glyph_display = "   ".join(emoji for _, emoji in glyphs)
@@ -193,27 +216,36 @@ def build_quasar_embed(
         color = 0x2F80ED
 
     embed = discord.Embed(
-        title="QUASAR SIMULATION",
+        title="QUASAR SIMULATION COMPLETE",
         description=(
+            "━━━━━━━━━━━━━━━━━━\n"
             "**V.E.R.A. Quantum Probability Simulator**\n"
-            '"Probability cannot be predicted. Only observed."\n\n'
-            f"## {glyph_display}\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"**Crew Member:** {member.mention}\n\n"
+            f"## {glyph_display}\n\n"
             f"**Probability Index:** {result_name}\n"
-            f"{result_desc}"
+            f"{result_desc}\n\n"
+            f"*{flavor}*"
         ),
         color=color
     )
     embed.add_field(
         name="Simulation Attempts",
-        value=f"{attempts_used} / {MAX_WEEKLY_ATTEMPTS} used\n{remaining} remaining",
+        value=f"**{attempts_used} / {MAX_WEEKLY_ATTEMPTS}** used\n**{remaining}** remaining",
         inline=True
     )
     embed.add_field(
         name="Highest Archived Index",
-        value=f"{player_row['best_result'] or 'No archived result yet'}\n{player_row['best_glyphs'] or ''}",
+        value=f"**{player_row['best_result'] or 'No archived result yet'}**\n{player_row['best_glyphs'] or ''}",
         inline=True
     )
-    embed.set_footer(text="Simulation complete. Results archived. — V.E.R.A.")
+    if result_index == 3:
+        embed.add_field(
+            name="V.E.R.A. Notice",
+            value="Quantum Convergence detected. This result is eligible for Hall of Legends review.",
+            inline=False
+        )
+    embed.set_footer(text="Simulation complete. Result archived. — V.E.R.A.")
     return embed
 
 
@@ -221,6 +253,18 @@ def member_is_admin(member: discord.Member) -> bool:
     if member.guild_permissions.administrator:
         return True
     return any(role.name == ADMIN_ROLE_NAME for role in member.roles)
+
+
+def top_rows(guild_id: int, limit: int = 10) -> list[sqlite3.Row]:
+    week = current_week()
+    with db() as con:
+        return con.execute("""
+            SELECT *
+            FROM player_weekly
+            WHERE week_number = ? AND guild_id = ? AND attempts_used > 0
+            ORDER BY best_index DESC, quantum_convergences DESC, partial_synchronizations DESC, attempts_used ASC, updated_at ASC
+            LIMIT ?
+        """, (week, guild_id, limit)).fetchall()
 
 
 @bot.event
@@ -259,7 +303,18 @@ async def quasar(interaction: discord.Interaction) -> None:
         )
         return
 
-    await interaction.response.defer(ephemeral=False, thinking=True)
+    await interaction.response.send_message(
+        embed=terminal_embed(member, "Initializing glyph matrix...", spinning_line(), "■□□□□□□□□□")
+    )
+    await asyncio.sleep(0.8)
+    await interaction.edit_original_response(
+        embed=terminal_embed(member, "Loading probability engine...", spinning_line(), "■■■■□□□□□□")
+    )
+    await asyncio.sleep(0.8)
+    await interaction.edit_original_response(
+        embed=terminal_embed(member, "Reels synchronizing...", spinning_line(), "■■■■■■■□□□")
+    )
+    await asyncio.sleep(0.8)
 
     glyphs = roll_glyphs()
     glyph_names = [name for name, _ in glyphs]
@@ -267,7 +322,7 @@ async def quasar(interaction: discord.Interaction) -> None:
     updated = save_roll(interaction.guild.id, member.id, member.display_name, glyphs, result_index)
     embed = build_quasar_embed(member, glyphs, result_index, updated)
 
-    await interaction.followup.send(embed=embed)
+    await interaction.edit_original_response(embed=embed)
 
 
 @bot.tree.command(name="quasar_profile", description="Check your current weekly Quasar Simulation record.")
@@ -283,6 +338,9 @@ async def quasar_profile(interaction: discord.Interaction) -> None:
     embed = discord.Embed(
         title="QUASAR PROFILE",
         description=(
+            "━━━━━━━━━━━━━━━━━━\n"
+            "**Crew Simulation Record**\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
             f"**Crew Member:** {interaction.user.mention}\n"
             f"**Attempts Used:** {attempts_used} / {MAX_WEEKLY_ATTEMPTS}\n"
             f"**Attempts Remaining:** {remaining}\n\n"
@@ -304,34 +362,38 @@ async def quasar_leaderboard(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("QSIM can only be used inside the server.", ephemeral=True)
         return
 
-    week = current_week()
-    with db() as con:
-        rows = con.execute("""
-            SELECT *
-            FROM player_weekly
-            WHERE week_number = ? AND guild_id = ? AND attempts_used > 0
-            ORDER BY best_index DESC, quantum_convergences DESC, partial_synchronizations DESC, attempts_used ASC, updated_at ASC
-            LIMIT 10
-        """, (week, interaction.guild.id)).fetchall()
+    rows = top_rows(interaction.guild.id, 10)
 
     if not rows:
         await interaction.response.send_message("No Quasar Simulation records have been archived this week.", ephemeral=True)
         return
 
+    medals = ["🥇", "🥈", "🥉"]
     lines = []
     for idx, row in enumerate(rows, start=1):
+        marker = medals[idx - 1] if idx <= 3 else f"**{idx}.**"
         lines.append(
-            f"**{idx}. {row['display_name']}** — {row['best_result']} "
+            f"{marker} **{row['display_name']}** — **{row['best_result']}** "
             f"({row['attempts_used']}/{MAX_WEEKLY_ATTEMPTS} attempts)\n"
             f"{row['best_glyphs'] or ''}"
         )
 
+    top_index = int(rows[0]["best_index"])
+    tied = [r for r in rows if int(r["best_index"]) == top_index]
+    tie_note = ""
+    if len(tied) > 1:
+        tie_note = (
+            "\n\n**Quantum Recalibration Required**\n"
+            "Multiple crew members share the highest Probability Index. "
+            "Advance tied participants to a Simulation Finalist Round."
+        )
+
     embed = discord.Embed(
         title="QUASAR WEEKLY STANDINGS",
-        description="\n\n".join(lines),
+        description="\n\n".join(lines) + tie_note,
         color=0x56CCF2
     )
-    embed.set_footer(text="If two or more crew members share the highest Probability Index, V.E.R.A. initiates Quantum Recalibration.")
+    embed.set_footer(text="V.E.R.A. preserves the highest archived Probability Index for each crew member.")
     await interaction.response.send_message(embed=embed)
 
 
@@ -342,8 +404,9 @@ async def quasar_help(interaction: discord.Interaction) -> None:
     embed = discord.Embed(
         title="QUASAR SIMULATION RULES",
         description=(
+            "━━━━━━━━━━━━━━━━━━\n"
             "**V.E.R.A. Quantum Probability Simulator**\n"
-            '"Probability cannot be predicted. Only observed."\n\n'
+            "━━━━━━━━━━━━━━━━━━\n\n"
             "**Simulation Rules**\n"
             "• Each crew member receives **10 Simulation Attempts** during the weekly event.\n"
             "• Every simulation generates **3 Simulation Glyphs**.\n"
@@ -360,8 +423,62 @@ async def quasar_help(interaction: discord.Interaction) -> None:
         ),
         color=0x2F80ED
     )
-    embed.set_footer(text="Simulation complete. Results archived. — V.E.R.A.")
+    embed.set_footer(text="Simulation rules loaded. — V.E.R.A.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="quasar_archive", description="Admin only: generate a V.E.R.A.-style weekly Quasar archive summary.")
+async def quasar_archive(interaction: discord.Interaction) -> None:
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("QSIM archive summaries can only be generated inside the server.", ephemeral=True)
+        return
+
+    if not member_is_admin(interaction.user):
+        await interaction.response.send_message("Access denied. Admin authorization required.", ephemeral=True)
+        return
+
+    rows = top_rows(interaction.guild.id, 10)
+    if not rows:
+        await interaction.response.send_message("No Quasar records are available to archive yet.", ephemeral=True)
+        return
+
+    champion = rows[0]
+    top_index = int(champion["best_index"])
+    tied = [r for r in rows if int(r["best_index"]) == top_index]
+
+    if len(tied) > 1:
+        champion_block = (
+            "Quantum Recalibration Required\n"
+            f"Tied Finalists: {', '.join(r['display_name'] for r in tied)}\n\n"
+        )
+    else:
+        champion_block = f"Weekly Quasar Simulation Champion: {champion['display_name']}\n\n"
+
+    standings = "\n".join(
+        f"{idx}. {row['display_name']} — {row['best_result']} {row['best_glyphs'] or ''}"
+        for idx, row in enumerate(rows[:5], start=1)
+    )
+
+    archive_text = (
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🎰 V.E.R.A. QUASAR ARCHIVE UPDATE\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Quantum Simulation Records Synchronized\n\n"
+        f"{champion_block}"
+        "Top Archived Probability Indexes\n"
+        f"{standings}\n\n"
+        "Memory Core Integrity:\n"
+        "100%\n\n"
+        '"Probability cannot be predicted. Only observed."\n\n'
+        "— V.E.R.A.\n"
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    await interaction.response.send_message(
+        "Copy this into your Archive Night / Hall of Legends post:\n\n"
+        f"```text\n{archive_text}\n```",
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="quasar_reset", description="Admin only: reset Quasar for a new weekly event.")
@@ -387,6 +504,6 @@ async def quasar_reset(interaction: discord.Interaction) -> None:
 
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is missing. Add it to your .env file.")
+    raise RuntimeError("DISCORD_TOKEN is missing. Add it to your Render Environment Variables.")
 
 bot.run(TOKEN)
