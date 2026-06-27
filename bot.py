@@ -16,6 +16,7 @@ TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
 GUILD_ID_RAW: Final[str | None] = os.getenv("GUILD_ID")
 DB_PATH: Final[str] = os.getenv("DB_PATH", "qsim_quasar.db")
 ADMIN_ROLE_NAME: Final[str] = os.getenv("ADMIN_ROLE_NAME", "Admin")
+OWNER_ID_RAW: Final[str | None] = os.getenv("OWNER_ID", "1433465822533386250")
 
 MAX_WEEKLY_ATTEMPTS: Final[int] = 10
 
@@ -250,6 +251,10 @@ def build_quasar_embed(
 
 
 def member_is_admin(member: discord.Member) -> bool:
+    # Owner lock for launch reliability.
+    # OWNER_ID is preferred because role names can fail from spacing, casing, or hierarchy issues.
+    if OWNER_ID_RAW and member.id == int(OWNER_ID_RAW):
+        return True
     if member.guild_permissions.administrator:
         return True
     return any(role.name == ADMIN_ROLE_NAME for role in member.roles)
