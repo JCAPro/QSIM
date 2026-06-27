@@ -1,5 +1,4 @@
-[README.md](https://github.com/user-attachments/files/29401200/README.md)
-
+[README.md](https://github.com/user-attachments/files/29401948/README.md)
 # QSIM — Quasar Simulation Bot v3.1
 
 This is the polished launch version of QSIM.
@@ -21,8 +20,8 @@ It still only handles Quasar. V.E.R.A. remains untouched.
 - `/quasar_profile` — Check your weekly record.
 - `/quasar_leaderboard` — Show weekly standings.
 - `/quasar_help` — Show rules.
-- `/quasar_archive` — Admin only. Generate a copy-ready V.E.R.A. archive update.
-- `/quasar_reset` — Admin only. Start a new weekly cycle.
+- `/quasar_archive` — Owner/admin only. Generate a copy-ready V.E.R.A. archive update.
+- `/quasar_reset` — Owner/admin only. Start a new weekly cycle.
 
 ## Render setup
 
@@ -32,6 +31,7 @@ Environment variables:
 DISCORD_TOKEN=your_new_qsim_bot_token
 GUILD_ID=1433479610749812848
 ADMIN_ROLE_NAME=Admin
+OWNER_ID=1433465822533386250
 DB_PATH=qsim_quasar.db
 ```
 
