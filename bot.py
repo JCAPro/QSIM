@@ -3,7 +3,7 @@ import os
 import random
 import sqlite3
 from datetime import datetime, timezone
-from typing import Final
+from typing import Final, Literal
 
 import discord
 from discord.ext import commands
@@ -70,11 +70,19 @@ def init_db() -> None:
             )
         """)
         con.execute("""
+            CREATE TABLE IF NOT EXISTS bandit_settings (
+                guild_id INTEGER PRIMARY KEY,
+                event_tracking INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        con.execute("""
             CREATE TABLE IF NOT EXISTS player_weekly (
                 week_number INTEGER NOT NULL,
                 guild_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
                 display_name TEXT NOT NULL,
+                event_eligible INTEGER NOT NULL DEFAULT 1,
                 attempts_used INTEGER NOT NULL DEFAULT 0,
                 best_index INTEGER NOT NULL DEFAULT 0,
                 best_result TEXT,
@@ -92,6 +100,7 @@ def init_db() -> None:
         """)
 
         # Existing Quasar installs already have player_weekly. These additions are non-destructive.
+        add_column_if_missing(con, "player_weekly", "event_eligible", "INTEGER NOT NULL DEFAULT 1")
         add_column_if_missing(con, "player_weekly", "legendary_jackpots", "INTEGER NOT NULL DEFAULT 0")
         add_column_if_missing(con, "player_weekly", "jackpots", "INTEGER NOT NULL DEFAULT 0")
         add_column_if_missing(con, "player_weekly", "doubles", "INTEGER NOT NULL DEFAULT 0")
@@ -103,6 +112,22 @@ def init_db() -> None:
                 "INSERT INTO weekly_state (id, week_number, started_at) VALUES (1, 1, ?)",
                 (datetime.now(timezone.utc).isoformat(),),
             )
+
+
+def tracking_enabled(guild_id: int) -> bool:
+    with db() as con:
+        row = con.execute("SELECT event_tracking FROM bandit_settings WHERE guild_id = ?", (guild_id,)).fetchone()
+        return True if row is None else bool(row["event_tracking"])
+
+
+def set_tracking(guild_id: int, enabled: bool) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as con:
+        con.execute(
+            "INSERT INTO bandit_settings (guild_id, event_tracking, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET event_tracking = excluded.event_tracking, updated_at = excluded.updated_at",
+            (guild_id, 1 if enabled else 0, now),
+        )
 
 
 def current_week() -> int:
@@ -178,6 +203,7 @@ def save_roll(
         return row
 
     new_attempts = int(row["attempts_used"]) + 1
+    eligible = 1 if tracking_enabled(guild_id) else 0
     best_index = int(row["best_index"])
     best_result = row["best_result"]
     best_glyphs = row["best_glyphs"]
@@ -195,11 +221,11 @@ def save_roll(
     with db() as con:
         con.execute("""
             UPDATE player_weekly
-            SET display_name = ?, attempts_used = ?, best_index = ?, best_result = ?, best_glyphs = ?,
+            SET display_name = ?, event_eligible = ?, attempts_used = ?, best_index = ?, best_result = ?, best_glyphs = ?,
                 legendary_jackpots = ?, jackpots = ?, doubles = ?, misses = ?, updated_at = ?
             WHERE week_number = ? AND guild_id = ? AND user_id = ?
         """, (
-            display_name, new_attempts, best_index, best_result, best_glyphs,
+            display_name, eligible, new_attempts, best_index, best_result, best_glyphs,
             legendary, jackpots, doubles, misses, now, week, guild_id, user_id,
         ))
         return con.execute("""
@@ -329,7 +355,7 @@ def top_rows(guild_id: int, limit: int = 10) -> list[sqlite3.Row]:
     with db() as con:
         return con.execute("""
             SELECT * FROM player_weekly
-            WHERE week_number = ? AND guild_id = ? AND attempts_used > 0
+            WHERE week_number = ? AND guild_id = ? AND attempts_used > 0 AND event_eligible = 1
             ORDER BY best_index DESC,
                      legendary_jackpots DESC,
                      jackpots DESC,
@@ -464,6 +490,23 @@ async def bandit_help(interaction: discord.Interaction) -> None:
     )
     embed.set_footer(text="Ten pulls. Eight symbols. One very stubborn machine.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="bandit_tracking", description="Admin only: turn Brass Bandit weekly event tracking on or off.")
+async def bandit_tracking(interaction: discord.Interaction, status: Literal["on", "off"]) -> None:
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("Event controls are only available inside the server.", ephemeral=True)
+        return
+    if not member_is_admin(interaction.user):
+        await interaction.response.send_message("Access denied. Admin authorization required.", ephemeral=True)
+        return
+    enabled = status == "on"
+    set_tracking(interaction.guild.id, enabled)
+    await interaction.response.send_message(
+        f"⚙️ **Brass Bandit weekly event tracking is now {'ON' if enabled else 'OFF'}.**\n"
+        + ("New pulls will count toward the weekly standings." if enabled else "The machine still plays normally, but new pulls will not be eligible for the weekly standings."),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="bandit_archive", description="Admin only: generate this week's Brass Bandit archive summary.")
