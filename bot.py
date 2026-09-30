@@ -272,7 +272,8 @@ def result_embed(
             "━━━━━━━━━━━━━━━━━━\n"
             "**THE REELS HAVE STOPPED**\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
-            f"**Player:** {member.mention}\n\n"
+            f"**Player:** {member.mention}\n"
+            f"**Event Tracking:** {'WEEKLY EVENT' if tracking_enabled(int(player_row['guild_id'])) else 'NONE'}\n\n"
             f"## {symbol_display}\n\n"
             f"**Result: {result_name}**\n"
             f"{result_desc}\n\n"
@@ -327,6 +328,7 @@ def profile_embed(member: discord.Member | discord.User, row: sqlite3.Row) -> di
         title="🎰 BRASS BANDIT RECORD",
         description=(
             f"**Player:** {member.mention}\n"
+            f"**Event Tracking:** {'WEEKLY EVENT' if tracking_enabled(int(row['guild_id'])) else 'NONE'}\n"
             f"**Pulls Used:** {used} / {MAX_WEEKLY_PULLS}\n"
             f"**Pulls Remaining:** {remaining}\n\n"
             f"**Best Pull:** {row['best_result'] or 'None yet'}\n"
@@ -516,6 +518,28 @@ async def bandit_tracking(interaction: discord.Interaction, status: Literal["on"
         + ("New pulls will count toward the weekly standings." if enabled else "The machine still plays normally, but new pulls will not be eligible for the weekly standings."),
         ephemeral=True,
     )
+
+
+@bot.tree.command(name="bandit_status", description="Admin only: check The Brass Bandit's live event-tracking switch.")
+async def bandit_status(interaction: discord.Interaction) -> None:
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("Event controls are only available inside the server.", ephemeral=True)
+        return
+    if not member_is_admin(interaction.user):
+        await interaction.response.send_message("Access denied. Admin authorization required.", ephemeral=True)
+        return
+    enabled = tracking_enabled(interaction.guild.id)
+    embed = discord.Embed(
+        title="🎰 THE BRASS BANDIT // EVENT STATUS",
+        description=(
+            f"**Event Tracking:** {'WEEKLY EVENT' if enabled else 'NONE'}\n"
+            f"**Tracking Switch:** {'ON' if enabled else 'OFF'}\n\n"
+            + ("New pulls are eligible for the weekly standings." if enabled else "The machine remains playable, but new pulls are not eligible for weekly standings.")
+        ),
+        color=0xB87333,
+    )
+    embed.set_footer(text="The Brass Bandit • Event Control Gauge")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="bandit_archive", description="Admin only: generate this week's Brass Bandit archive summary.")
