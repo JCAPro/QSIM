@@ -425,7 +425,18 @@ async def bandit(interaction: discord.Interaction) -> None:
     # pull. This is the only normal channel message created by solo Bandit play.
     await interaction.edit_original_response(embed=result_embed(member, symbols, result_index, updated))
     if int(updated["attempts_used"]) >= MAX_WEEKLY_PULLS:
-        await interaction.channel.send(embed=profile_embed(member, updated))
+        # The interaction started ephemeral, and Discord cannot convert that original
+        # response into a public message. Publish the completed 10-pull session as a
+        # normal follow-up, then remove the private final-pull card so the player is
+        # left with exactly one permanent public result.
+        await interaction.followup.send(
+            embed=profile_embed(member, updated),
+            ephemeral=False
+        )
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            pass
 
 
 @bot.tree.command(name="bandit_profile", description="Check your current Brass Bandit weekly record.")
