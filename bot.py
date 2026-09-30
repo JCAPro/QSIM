@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from typing import Final
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -14,25 +13,31 @@ load_dotenv()
 
 TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
 GUILD_ID_RAW: Final[str | None] = os.getenv("GUILD_ID")
-DB_PATH: Final[str] = os.getenv("DB_PATH", "qsim_quasar.db")
+DB_PATH: Final[str] = os.getenv("DB_PATH", "brass_bandit.db")
 ADMIN_ROLE_NAME: Final[str] = os.getenv("ADMIN_ROLE_NAME", "Admin")
 OWNER_ID_RAW: Final[str | None] = os.getenv("OWNER_ID", "1433465822533386250")
 
-MAX_WEEKLY_ATTEMPTS: Final[int] = 10
+MAX_WEEKLY_PULLS: Final[int] = 10
 
-GLYPHS: Final[list[tuple[str, str]]] = [
-    ("N7 Logo", "<:N7Stained:1519928704552275968>"),
-    ("N7 Helmet", "<:N7Helmet:1519921763214164010>"),
-    ("N7 Spectre", "<:N7Spectre:1519922691568828498>"),
-    ("Platinum", "<:Platinum:1519922428665397248>"),
-    ("Insanity III", "<:InsanityIIITrophy:1519921452009390110>"),
-    ("M35 Mako", "<:M35Mako:1519922319009775626>"),
+# Exact World of Hiveren server emoji names/IDs supplied by the server owner.
+SYMBOLS: Final[list[tuple[str, str]]] = [
+    ("Rooney", "<:Rooney:1554662855486480414>"),
+    ("Nixxon", "<:Nixxon:1554662953318481920>"),
+    ("Mixxie", "<:Mixxie:1554663016799404032>"),
+    ("Minerva", "<:Minerva:1554663081991209021>"),
+    ("Lance", "<:Lance:1554663140308951120>"),
+    ("Elias", "<:Elias:1554663194117800007>"),
+    ("Celmore", "<:Celmore:1554663244252319774>"),
+    ("THE SEVEN CHAMPIONS", "<:THE_SEVEN_CHAMPIONS:1554807329956954162>"),
 ]
+LEGENDARY_SYMBOL_NAME: Final[str] = "THE SEVEN CHAMPIONS"
 
+# Ranking values are deliberately simple so the old highest-result system remains intact.
 RESULTS: Final[dict[int, tuple[str, str, str]]] = {
-    3: ("Quantum Convergence", "Three matching Simulation Glyphs.", "Probability spike confirmed. Champion-grade result archived."),
-    2: ("Partial Synchronization", "Any two matching Simulation Glyphs.", "Minor probability alignment detected."),
-    1: ("Null Reading", "No matching Simulation Glyphs.", "No convergence detected. Data still preserved."),
+    4: ("Legendary Jackpot", "THE SEVEN CHAMPIONS aligned across all three reels.", "The machine has witnessed a legend."),
+    3: ("Jackpot", "Three matching symbols.", "Three of a kind. The Bandit pays attention."),
+    2: ("Double", "Any two matching symbols.", "Two reels agree. Not bad at all."),
+    1: ("No Match", "No matching symbols.", "The gears turn. Fortune keeps moving."),
 }
 
 intents = discord.Intents.default()
@@ -45,7 +50,17 @@ def db() -> sqlite3.Connection:
     return con
 
 
+def column_names(con: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def add_column_if_missing(con: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    if column not in column_names(con, table):
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db() -> None:
+    """Create the Brass Bandit schema and safely migrate an existing Quasar database."""
     with db() as con:
         con.execute("""
             CREATE TABLE IF NOT EXISTS weekly_state (
@@ -67,15 +82,26 @@ def init_db() -> None:
                 quantum_convergences INTEGER NOT NULL DEFAULT 0,
                 partial_synchronizations INTEGER NOT NULL DEFAULT 0,
                 null_readings INTEGER NOT NULL DEFAULT 0,
+                legendary_jackpots INTEGER NOT NULL DEFAULT 0,
+                jackpots INTEGER NOT NULL DEFAULT 0,
+                doubles INTEGER NOT NULL DEFAULT 0,
+                misses INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (week_number, guild_id, user_id)
             )
         """)
+
+        # Existing Quasar installs already have player_weekly. These additions are non-destructive.
+        add_column_if_missing(con, "player_weekly", "legendary_jackpots", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(con, "player_weekly", "jackpots", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(con, "player_weekly", "doubles", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(con, "player_weekly", "misses", "INTEGER NOT NULL DEFAULT 0")
+
         row = con.execute("SELECT * FROM weekly_state WHERE id = 1").fetchone()
         if not row:
             con.execute(
                 "INSERT INTO weekly_state (id, week_number, started_at) VALUES (1, 1, ?)",
-                (datetime.now(timezone.utc).isoformat(),)
+                (datetime.now(timezone.utc).isoformat(),),
             )
 
 
@@ -91,13 +117,15 @@ def next_week() -> int:
         week = int(row["week_number"]) + 1
         con.execute(
             "UPDATE weekly_state SET week_number = ?, started_at = ? WHERE id = 1",
-            (week, datetime.now(timezone.utc).isoformat())
+            (week, datetime.now(timezone.utc).isoformat()),
         )
         return week
 
 
-def index_from_roll(glyph_names: list[str]) -> int:
-    unique_count = len(set(glyph_names))
+def result_from_roll(symbol_names: list[str]) -> int:
+    if all(name == LEGENDARY_SYMBOL_NAME for name in symbol_names):
+        return 4
+    unique_count = len(set(symbol_names))
     if unique_count == 1:
         return 3
     if unique_count == 2:
@@ -105,12 +133,12 @@ def index_from_roll(glyph_names: list[str]) -> int:
     return 1
 
 
-def roll_glyphs() -> list[tuple[str, str]]:
-    return [random.choice(GLYPHS) for _ in range(3)]
+def roll_symbols() -> list[tuple[str, str]]:
+    return [random.choice(SYMBOLS) for _ in range(3)]
 
 
 def spinning_line() -> str:
-    return "   ".join(random.choice(GLYPHS)[1] for _ in range(3))
+    return "   ".join(random.choice(SYMBOLS)[1] for _ in range(3))
 
 
 def ensure_player(guild_id: int, user_id: int, display_name: str) -> sqlite3.Row:
@@ -133,14 +161,20 @@ def ensure_player(guild_id: int, user_id: int, display_name: str) -> sqlite3.Row
         """, (week, guild_id, user_id)).fetchone()
 
 
-def save_roll(guild_id: int, user_id: int, display_name: str, glyphs: list[tuple[str, str]], result_index: int) -> sqlite3.Row:
+def save_roll(
+    guild_id: int,
+    user_id: int,
+    display_name: str,
+    symbols: list[tuple[str, str]],
+    result_index: int,
+) -> sqlite3.Row:
     week = current_week()
     now = datetime.now(timezone.utc).isoformat()
-    glyph_text = " ".join(emoji for _, emoji in glyphs)
+    symbol_text = " ".join(emoji for _, emoji in symbols)
     result_name = RESULTS[result_index][0]
 
     row = ensure_player(guild_id, user_id, display_name)
-    if int(row["attempts_used"]) >= MAX_WEEKLY_ATTEMPTS:
+    if int(row["attempts_used"]) >= MAX_WEEKLY_PULLS:
         return row
 
     new_attempts = int(row["attempts_used"]) + 1
@@ -151,28 +185,22 @@ def save_roll(guild_id: int, user_id: int, display_name: str, glyphs: list[tuple
     if result_index > best_index:
         best_index = result_index
         best_result = result_name
-        best_glyphs = glyph_text
+        best_glyphs = symbol_text
 
-    qc = int(row["quantum_convergences"]) + (1 if result_index == 3 else 0)
-    ps = int(row["partial_synchronizations"]) + (1 if result_index == 2 else 0)
-    nr = int(row["null_readings"]) + (1 if result_index == 1 else 0)
+    legendary = int(row["legendary_jackpots"]) + (1 if result_index == 4 else 0)
+    jackpots = int(row["jackpots"]) + (1 if result_index == 3 else 0)
+    doubles = int(row["doubles"]) + (1 if result_index == 2 else 0)
+    misses = int(row["misses"]) + (1 if result_index == 1 else 0)
 
     with db() as con:
         con.execute("""
             UPDATE player_weekly
-            SET display_name = ?,
-                attempts_used = ?,
-                best_index = ?,
-                best_result = ?,
-                best_glyphs = ?,
-                quantum_convergences = ?,
-                partial_synchronizations = ?,
-                null_readings = ?,
-                updated_at = ?
+            SET display_name = ?, attempts_used = ?, best_index = ?, best_result = ?, best_glyphs = ?,
+                legendary_jackpots = ?, jackpots = ?, doubles = ?, misses = ?, updated_at = ?
             WHERE week_number = ? AND guild_id = ? AND user_id = ?
         """, (
             display_name, new_attempts, best_index, best_result, best_glyphs,
-            qc, ps, nr, now, week, guild_id, user_id
+            legendary, jackpots, doubles, misses, now, week, guild_id, user_id,
         ))
         return con.execute("""
             SELECT * FROM player_weekly
@@ -180,79 +208,115 @@ def save_roll(guild_id: int, user_id: int, display_name: str, glyphs: list[tuple
         """, (week, guild_id, user_id)).fetchone()
 
 
-def terminal_embed(member: discord.Member | discord.User, stage: str, line: str, progress: str) -> discord.Embed:
+def machine_embed(member: discord.Member | discord.User, stage: str, line: str, progress: str) -> discord.Embed:
     embed = discord.Embed(
-        title="QUASAR SIMULATION",
+        title="🎰 THE BRASS BANDIT",
         description=(
             "━━━━━━━━━━━━━━━━━━\n"
-            "**V.E.R.A. Quantum Probability Simulator**\n"
+            "**Gilded Gear Fortune Machine**\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
-            f"**Crew Member:** {member.mention}\n"
-            f"**Status:** {stage}\n\n"
+            f"**Player:** {member.mention}\n"
+            f"**Machine:** {stage}\n\n"
             f"## {line}\n\n"
             f"`{progress}`"
         ),
-        color=0x2F80ED
+        color=0xB87333,
     )
-    embed.set_footer(text="Synchronizing probability matrix...")
+    embed.set_footer(text="Gears turning... fortune pending...")
     return embed
 
 
-def build_quasar_embed(
+def result_embed(
     member: discord.Member | discord.User,
-    glyphs: list[tuple[str, str]],
+    symbols: list[tuple[str, str]],
     result_index: int,
     player_row: sqlite3.Row,
 ) -> discord.Embed:
     result_name, result_desc, flavor = RESULTS[result_index]
-    attempts_used = int(player_row["attempts_used"])
-    remaining = MAX_WEEKLY_ATTEMPTS - attempts_used
-    glyph_display = "   ".join(emoji for _, emoji in glyphs)
+    pulls_used = int(player_row["attempts_used"])
+    remaining = MAX_WEEKLY_PULLS - pulls_used
+    symbol_display = "   ".join(emoji for _, emoji in symbols)
 
-    if result_index == 3:
-        color = 0xF2C94C
-    elif result_index == 2:
-        color = 0x56CCF2
-    else:
-        color = 0x2F80ED
+    colors = {4: 0xFFD700, 3: 0xD4AF37, 2: 0xCD7F32, 1: 0x7A5C43}
+    title = "👑 LEGENDARY JACKPOT 👑" if result_index == 4 else "🎰 THE BRASS BANDIT"
 
     embed = discord.Embed(
-        title="QUASAR SIMULATION COMPLETE",
+        title=title,
         description=(
             "━━━━━━━━━━━━━━━━━━\n"
-            "**V.E.R.A. Quantum Probability Simulator**\n"
+            "**THE REELS HAVE STOPPED**\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
-            f"**Crew Member:** {member.mention}\n\n"
-            f"## {glyph_display}\n\n"
-            f"**Probability Index:** {result_name}\n"
+            f"**Player:** {member.mention}\n\n"
+            f"## {symbol_display}\n\n"
+            f"**Result: {result_name}**\n"
             f"{result_desc}\n\n"
             f"*{flavor}*"
         ),
-        color=color
+        color=colors[result_index],
     )
     embed.add_field(
-        name="Simulation Attempts",
-        value=f"**{attempts_used} / {MAX_WEEKLY_ATTEMPTS}** used\n**{remaining}** remaining",
-        inline=True
+        name="Weekly Pulls",
+        value=f"**{pulls_used} / {MAX_WEEKLY_PULLS}** used\n**{remaining}** remaining",
+        inline=True,
     )
     embed.add_field(
-        name="Highest Archived Index",
-        value=f"**{player_row['best_result'] or 'No archived result yet'}**\n{player_row['best_glyphs'] or ''}",
-        inline=True
+        name="Best Pull",
+        value=f"**{player_row['best_result'] or 'None yet'}**\n{player_row['best_glyphs'] or ''}",
+        inline=True,
     )
-    if result_index == 3:
+    if result_index == 4:
         embed.add_field(
-            name="V.E.R.A. Notice",
-            value="Quantum Convergence detected. This result is eligible for Hall of Legends review.",
-            inline=False
+            name="👑 The Seven Have Aligned",
+            value="A **Legendary Jackpot** has been recorded. This pull outranks every standard jackpot.",
+            inline=False,
         )
-    embed.set_footer(text="Simulation complete. Result archived. — V.E.R.A.")
+    elif result_index == 3:
+        embed.add_field(
+            name="🏆 Jackpot",
+            value="Three matching champions landed on the reels.",
+            inline=False,
+        )
+
+    if remaining == 0:
+        embed.add_field(
+            name="Session Complete",
+            value=(
+                f"👑 Legendary Jackpots: **{player_row['legendary_jackpots']}**\n"
+                f"🏆 Jackpots: **{player_row['jackpots']}**\n"
+                f"✨ Doubles: **{player_row['doubles']}**\n"
+                f"🎲 No Matches: **{player_row['misses']}**"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="All 10 weekly pulls used. The Brass Bandit remembers your best fortune.")
+    else:
+        embed.set_footer(text="Pull recorded. The Brass Bandit awaits your next try.")
+    return embed
+
+
+def profile_embed(member: discord.Member | discord.User, row: sqlite3.Row) -> discord.Embed:
+    used = int(row["attempts_used"])
+    remaining = MAX_WEEKLY_PULLS - used
+    embed = discord.Embed(
+        title="🎰 BRASS BANDIT RECORD",
+        description=(
+            f"**Player:** {member.mention}\n"
+            f"**Pulls Used:** {used} / {MAX_WEEKLY_PULLS}\n"
+            f"**Pulls Remaining:** {remaining}\n\n"
+            f"**Best Pull:** {row['best_result'] or 'None yet'}\n"
+            f"{row['best_glyphs'] or ''}"
+        ),
+        color=0xB87333,
+    )
+    embed.add_field(name="👑 Legendary", value=str(row["legendary_jackpots"]), inline=True)
+    embed.add_field(name="🏆 Jackpots", value=str(row["jackpots"]), inline=True)
+    embed.add_field(name="✨ Doubles", value=str(row["doubles"]), inline=True)
+    embed.add_field(name="🎲 No Matches", value=str(row["misses"]), inline=True)
+    embed.set_footer(text="Only your highest pull determines your weekly standing.")
     return embed
 
 
 def member_is_admin(member: discord.Member) -> bool:
-    # Owner lock for launch reliability.
-    # OWNER_ID is preferred because role names can fail from spacing, casing, or hierarchy issues.
     if OWNER_ID_RAW and member.id == int(OWNER_ID_RAW):
         return True
     if member.guild_permissions.administrator:
@@ -264,10 +328,14 @@ def top_rows(guild_id: int, limit: int = 10) -> list[sqlite3.Row]:
     week = current_week()
     with db() as con:
         return con.execute("""
-            SELECT *
-            FROM player_weekly
+            SELECT * FROM player_weekly
             WHERE week_number = ? AND guild_id = ? AND attempts_used > 0
-            ORDER BY best_index DESC, quantum_convergences DESC, partial_synchronizations DESC, attempts_used ASC, updated_at ASC
+            ORDER BY best_index DESC,
+                     legendary_jackpots DESC,
+                     jackpots DESC,
+                     doubles DESC,
+                     attempts_used ASC,
+                     updated_at ASC
             LIMIT ?
         """, (week, guild_id, limit)).fetchall()
 
@@ -279,98 +347,68 @@ async def on_ready() -> None:
         guild = discord.Object(id=int(GUILD_ID_RAW))
         bot.tree.copy_global_to(guild=guild)
         await bot.tree.sync(guild=guild)
-        print(f"QSIM synced commands to guild {GUILD_ID_RAW}.")
+        print(f"The Brass Bandit synced commands to guild {GUILD_ID_RAW}.")
     else:
         await bot.tree.sync()
-        print("QSIM synced global commands.")
-    print(f"QSIM online as {bot.user}.")
+        print("The Brass Bandit synced global commands.")
+    print(f"The Brass Bandit online as {bot.user}.")
 
 
-@bot.tree.command(name="quasar", description="Run one Quasar Simulation attempt.")
-async def quasar(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="bandit", description="Pull The Brass Bandit's reels once.")
+async def bandit(interaction: discord.Interaction) -> None:
     if not interaction.guild:
-        await interaction.response.send_message("QSIM can only be used inside the server.", ephemeral=True)
+        await interaction.response.send_message("The Brass Bandit can only be played inside the server.", ephemeral=True)
         return
 
     member = interaction.user
     row = ensure_player(interaction.guild.id, member.id, member.display_name)
-
-    if int(row["attempts_used"]) >= MAX_WEEKLY_ATTEMPTS:
+    if int(row["attempts_used"]) >= MAX_WEEKLY_PULLS:
         await interaction.response.send_message(
-            "━━━━━━━━━━━━━━━━━━\n"
-            "**QUASAR SIMULATION LOCKED**\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            "You have used all **10** Simulation Attempts for this weekly event.\n"
-            f"Highest archived Probability Index: **{row['best_result'] or 'None'}**\n\n"
-            "The Galatana Memory Core will preserve your highest result.\n"
-            "— V.E.R.A.",
-            ephemeral=True
+            f"🎰 You've already used all **{MAX_WEEKLY_PULLS}** Brass Bandit pulls this week.\n"
+            f"Your best pull is **{row['best_result'] or 'None'}** {row['best_glyphs'] or ''}",
+            ephemeral=True,
         )
         return
 
+    # Preserve the original three-stage animated reel sequence that made Quasar popular.
     await interaction.response.send_message(
-        embed=terminal_embed(member, "Initializing glyph matrix...", spinning_line(), "■□□□□□□□□□")
+        embed=machine_embed(member, "Winding the mechanism...", spinning_line(), "■□□□□□□□□□")
     )
     await asyncio.sleep(0.8)
     await interaction.edit_original_response(
-        embed=terminal_embed(member, "Loading probability engine...", spinning_line(), "■■■■□□□□□□")
+        embed=machine_embed(member, "Feeding the brass reels...", spinning_line(), "■■■■□□□□□□")
     )
     await asyncio.sleep(0.8)
     await interaction.edit_original_response(
-        embed=terminal_embed(member, "Reels synchronizing...", spinning_line(), "■■■■■■■□□□")
+        embed=machine_embed(member, "Fortune locking into place...", spinning_line(), "■■■■■■■□□□")
     )
     await asyncio.sleep(0.8)
 
-    glyphs = roll_glyphs()
-    glyph_names = [name for name, _ in glyphs]
-    result_index = index_from_roll(glyph_names)
-    updated = save_roll(interaction.guild.id, member.id, member.display_name, glyphs, result_index)
-    embed = build_quasar_embed(member, glyphs, result_index, updated)
-
-    await interaction.edit_original_response(embed=embed)
+    symbols = roll_symbols()
+    names = [name for name, _ in symbols]
+    result_index = result_from_roll(names)
+    updated = save_roll(interaction.guild.id, member.id, member.display_name, symbols, result_index)
+    await interaction.edit_original_response(embed=result_embed(member, symbols, result_index, updated))
 
 
-@bot.tree.command(name="quasar_profile", description="Check your current weekly Quasar Simulation record.")
-async def quasar_profile(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="bandit_profile", description="Check your current Brass Bandit weekly record.")
+async def bandit_profile(interaction: discord.Interaction) -> None:
     if not interaction.guild:
-        await interaction.response.send_message("QSIM can only be used inside the server.", ephemeral=True)
+        await interaction.response.send_message("The Brass Bandit can only be used inside the server.", ephemeral=True)
         return
-
     row = ensure_player(interaction.guild.id, interaction.user.id, interaction.user.display_name)
-    attempts_used = int(row["attempts_used"])
-    remaining = MAX_WEEKLY_ATTEMPTS - attempts_used
-
-    embed = discord.Embed(
-        title="QUASAR PROFILE",
-        description=(
-            "━━━━━━━━━━━━━━━━━━\n"
-            "**Crew Simulation Record**\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            f"**Crew Member:** {interaction.user.mention}\n"
-            f"**Attempts Used:** {attempts_used} / {MAX_WEEKLY_ATTEMPTS}\n"
-            f"**Attempts Remaining:** {remaining}\n\n"
-            f"**Highest Probability Index:** {row['best_result'] or 'No archived result yet'}\n"
-            f"{row['best_glyphs'] or ''}"
-        ),
-        color=0x2F80ED
-    )
-    embed.add_field(name="Quantum Convergence", value=str(row["quantum_convergences"]), inline=True)
-    embed.add_field(name="Partial Synchronization", value=str(row["partial_synchronizations"]), inline=True)
-    embed.add_field(name="Null Reading", value=str(row["null_readings"]), inline=True)
-    embed.set_footer(text="Only your highest Probability Index counts for the weekly event. — V.E.R.A.")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=profile_embed(interaction.user, row), ephemeral=True)
 
 
-@bot.tree.command(name="quasar_leaderboard", description="View this week's Quasar Simulation standings.")
-async def quasar_leaderboard(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="bandit_leaderboard", description="View this week's Brass Bandit standings.")
+async def bandit_leaderboard(interaction: discord.Interaction) -> None:
     if not interaction.guild:
-        await interaction.response.send_message("QSIM can only be used inside the server.", ephemeral=True)
+        await interaction.response.send_message("The Brass Bandit can only be used inside the server.", ephemeral=True)
         return
 
     rows = top_rows(interaction.guild.id, 10)
-
     if not rows:
-        await interaction.response.send_message("No Quasar Simulation records have been archived this week.", ephemeral=True)
+        await interaction.response.send_message("Nobody has challenged The Brass Bandit this week yet.", ephemeral=True)
         return
 
     medals = ["🥇", "🥈", "🥉"]
@@ -379,8 +417,7 @@ async def quasar_leaderboard(interaction: discord.Interaction) -> None:
         marker = medals[idx - 1] if idx <= 3 else f"**{idx}.**"
         lines.append(
             f"{marker} **{row['display_name']}** — **{row['best_result']}** "
-            f"({row['attempts_used']}/{MAX_WEEKLY_ATTEMPTS} attempts)\n"
-            f"{row['best_glyphs'] or ''}"
+            f"({row['attempts_used']}/{MAX_WEEKLY_PULLS} pulls)\n{row['best_glyphs'] or ''}"
         )
 
     top_index = int(rows[0]["best_index"])
@@ -388,110 +425,95 @@ async def quasar_leaderboard(interaction: discord.Interaction) -> None:
     tie_note = ""
     if len(tied) > 1:
         tie_note = (
-            "\n\n**Quantum Recalibration Required**\n"
-            "Multiple crew members share the highest Probability Index. "
-            "Advance tied participants to a Simulation Finalist Round."
+            "\n\n**⚙️ Fortune Tied**\n"
+            "Multiple players share the highest result. Use your established finalist/tiebreak round if needed."
         )
 
     embed = discord.Embed(
-        title="QUASAR WEEKLY STANDINGS",
+        title="🎰 THE BRASS BANDIT — WEEKLY STANDINGS",
         description="\n\n".join(lines) + tie_note,
-        color=0x56CCF2
+        color=0xB87333,
     )
-    embed.set_footer(text="V.E.R.A. preserves the highest archived Probability Index for each crew member.")
+    embed.set_footer(text="Highest pull first. Legendary Jackpots outrank standard Jackpots.")
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="quasar_help", description="Show Quasar Simulation rules.")
-async def quasar_help(interaction: discord.Interaction) -> None:
-    glyph_library = "\n".join(f"• {emoji} **{name}**" for name, emoji in GLYPHS)
-
+@bot.tree.command(name="bandit_help", description="Show The Brass Bandit's rules and reel symbols.")
+async def bandit_help(interaction: discord.Interaction) -> None:
+    symbol_library = "\n".join(f"• {emoji} **{name}**" for name, emoji in SYMBOLS)
     embed = discord.Embed(
-        title="QUASAR SIMULATION RULES",
+        title="🎰 THE BRASS BANDIT — RULES",
         description=(
             "━━━━━━━━━━━━━━━━━━\n"
-            "**V.E.R.A. Quantum Probability Simulator**\n"
+            "**The Gilded Gear's Fortune Machine**\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
-            "**Simulation Rules**\n"
-            "• Each crew member receives **10 Simulation Attempts** during the weekly event.\n"
-            "• Every simulation generates **3 Simulation Glyphs**.\n"
-            "• Only your highest Probability Index achieved during the event counts.\n"
-            "• The highest Probability Index at the conclusion of the event becomes the Weekly Quasar Simulation Champion.\n\n"
-            "**Simulation Glyph Library**\n"
-            f"{glyph_library}\n\n"
-            "**Probability Index**\n"
-            "• **Quantum Convergence** — Three matching Simulation Glyphs.\n"
-            "• **Partial Synchronization** — Any two matching Simulation Glyphs.\n"
-            "• **Null Reading** — No matching Simulation Glyphs.\n\n"
-            "**Quantum Recalibration**\n"
-            "If two or more crew members achieve the same highest Probability Index, tied participants advance to a Simulation Finalist Round."
+            f"• Every player receives **{MAX_WEEKLY_PULLS} pulls** each week.\n"
+            "• Every pull spins **3 reels**.\n"
+            "• Your **highest result** is used for the weekly standings.\n"
+            "• Each reel chooses independently from all eight symbols.\n\n"
+            "**Reel Symbols**\n"
+            f"{symbol_library}\n\n"
+            "**Results**\n"
+            "👑 **Legendary Jackpot** — THE SEVEN CHAMPIONS ×3.\n"
+            "🏆 **Jackpot** — Any other three matching symbols.\n"
+            "✨ **Double** — Any two matching symbols.\n"
+            "🎲 **No Match** — Three different symbols.\n\n"
+            "The Seven Champions symbol is not weighted or rigged; it spins with the same chance as every other symbol."
         ),
-        color=0x2F80ED
+        color=0xB87333,
     )
-    embed.set_footer(text="Simulation rules loaded. — V.E.R.A.")
+    embed.set_footer(text="Ten pulls. Eight symbols. One very stubborn machine.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="quasar_archive", description="Admin only: generate a V.E.R.A.-style weekly Quasar archive summary.")
-async def quasar_archive(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="bandit_archive", description="Admin only: generate this week's Brass Bandit archive summary.")
+async def bandit_archive(interaction: discord.Interaction) -> None:
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
-        await interaction.response.send_message("QSIM archive summaries can only be generated inside the server.", ephemeral=True)
+        await interaction.response.send_message("Archive summaries can only be generated inside the server.", ephemeral=True)
         return
-
     if not member_is_admin(interaction.user):
         await interaction.response.send_message("Access denied. Admin authorization required.", ephemeral=True)
         return
 
     rows = top_rows(interaction.guild.id, 10)
     if not rows:
-        await interaction.response.send_message("No Quasar records are available to archive yet.", ephemeral=True)
+        await interaction.response.send_message("No Brass Bandit records are available yet.", ephemeral=True)
         return
 
     champion = rows[0]
     top_index = int(champion["best_index"])
     tied = [r for r in rows if int(r["best_index"]) == top_index]
-
     if len(tied) > 1:
-        champion_block = (
-            "Quantum Recalibration Required\n"
-            f"Tied Finalists: {', '.join(r['display_name'] for r in tied)}\n\n"
-        )
+        champion_block = f"Tied fortune leaders: {', '.join(r['display_name'] for r in tied)}\n\n"
     else:
-        champion_block = f"Weekly Quasar Simulation Champion: {champion['display_name']}\n\n"
+        champion_block = f"Weekly Brass Bandit Champion: {champion['display_name']}\n\n"
 
     standings = "\n".join(
         f"{idx}. {row['display_name']} — {row['best_result']} {row['best_glyphs'] or ''}"
         for idx, row in enumerate(rows[:5], start=1)
     )
-
     archive_text = (
         "━━━━━━━━━━━━━━━━━━\n"
-        "🎰 V.E.R.A. QUASAR ARCHIVE UPDATE\n"
+        "🎰 THE BRASS BANDIT — WEEKLY RESULTS\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "Quantum Simulation Records Synchronized\n\n"
         f"{champion_block}"
-        "Top Archived Probability Indexes\n"
+        "Top Fortunes\n"
         f"{standings}\n\n"
-        "Memory Core Integrity:\n"
-        "100%\n\n"
-        '"Probability cannot be predicted. Only observed."\n\n'
-        "— V.E.R.A.\n"
+        '"Fortune favors whoever keeps pulling the lever."\n'
         "━━━━━━━━━━━━━━━━━━"
     )
-
     await interaction.response.send_message(
-        "Copy this into your Archive Night / Hall of Legends post:\n\n"
+        "Copy this into your Hall of Champions / weekly results post:\n\n"
         f"```text\n{archive_text}\n```",
-        ephemeral=True
+        ephemeral=True,
     )
 
 
-@bot.tree.command(name="quasar_reset", description="Admin only: reset Quasar for a new weekly event.")
-async def quasar_reset(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="bandit_reset", description="Admin only: reset The Brass Bandit for a new weekly event.")
+async def bandit_reset(interaction: discord.Interaction) -> None:
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
-        await interaction.response.send_message("QSIM can only be reset inside the server.", ephemeral=True)
+        await interaction.response.send_message("The Brass Bandit can only be reset inside the server.", ephemeral=True)
         return
-
     if not member_is_admin(interaction.user):
         await interaction.response.send_message("Access denied. Admin authorization required.", ephemeral=True)
         return
@@ -499,12 +521,12 @@ async def quasar_reset(interaction: discord.Interaction) -> None:
     new_week = next_week()
     await interaction.response.send_message(
         "━━━━━━━━━━━━━━━━━━\n"
-        "**QUASAR WEEKLY RESET COMPLETE**\n"
+        "**🎰 THE BRASS BANDIT HAS BEEN RESET**\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"New archive cycle initialized: **Week {new_week}**\n"
-        "All crew members now have **10 Simulation Attempts** available.\n\n"
-        "— V.E.R.A.",
-        ephemeral=True
+        f"Weekly round **{new_week}** is now open.\n"
+        f"Every player has **{MAX_WEEKLY_PULLS} fresh pulls** available.\n\n"
+        "Good luck. The machine makes no promises.",
+        ephemeral=True,
     )
 
 
