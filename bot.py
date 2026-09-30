@@ -396,9 +396,12 @@ async def bandit(interaction: discord.Interaction) -> None:
         )
         return
 
-    # Preserve the original three-stage animated reel sequence that made Quasar popular.
+    # Keep pulls 1-9 private so the channel does not fill with ten permanent
+    # Brass Bandit result cards per player. The reel animation still runs exactly
+    # as before, but in an ephemeral interaction visible only to the player.
     await interaction.response.send_message(
-        embed=machine_embed(member, "Winding the mechanism...", spinning_line(), "■□□□□□□□□□")
+        embed=machine_embed(member, "Winding the mechanism...", spinning_line(), "■□□□□□□□□□"),
+        ephemeral=True,
     )
     await asyncio.sleep(0.8)
     await interaction.edit_original_response(
@@ -414,7 +417,13 @@ async def bandit(interaction: discord.Interaction) -> None:
     names = [name for name, _ in symbols]
     result_index = result_from_roll(names)
     updated = save_roll(interaction.guild.id, member.id, member.display_name, symbols, result_index)
+
+    # Show every individual pull result privately. On pull 10, publish exactly
+    # one permanent weekly result card containing the player's final record/best
+    # pull. This is the only normal channel message created by solo Bandit play.
     await interaction.edit_original_response(embed=result_embed(member, symbols, result_index, updated))
+    if int(updated["attempts_used"]) >= MAX_WEEKLY_PULLS:
+        await interaction.channel.send(embed=profile_embed(member, updated))
 
 
 @bot.tree.command(name="bandit_profile", description="Check your current Brass Bandit weekly record.")
