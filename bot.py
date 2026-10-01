@@ -28,7 +28,7 @@ SYMBOLS: Final[list[tuple[str, str]]] = [
     ("Lance", "<:Lance:1554663140308951120>"),
     ("Elias", "<:Elias:1554663194117800007>"),
     ("Celmore", "<:Celmore:1554663244252319774>"),
-    ("THE SEVEN CHAMPIONS", "<:THESEVENChampions:1555038250484105267>"),
+    ("THE SEVEN CHAMPIONS", "<:THE_SEVEN_CHAMPIONS:1554811042284970025>"),
 ]
 LEGENDARY_SYMBOL_NAME: Final[str] = "THE SEVEN CHAMPIONS"
 
@@ -345,11 +345,13 @@ def profile_embed(member: discord.Member | discord.User, row: sqlite3.Row) -> di
 
 
 def member_is_admin(member: discord.Member) -> bool:
-    if OWNER_ID_RAW and member.id == int(OWNER_ID_RAW):
-        return True
-    if member.guild_permissions.administrator:
-        return True
-    return any(role.name == ADMIN_ROLE_NAME for role in member.roles)
+    """Owner-only clearance for Brass Bandit control commands."""
+    if not OWNER_ID_RAW:
+        return False
+    try:
+        return member.id == int(OWNER_ID_RAW)
+    except (TypeError, ValueError):
+        return False
 
 
 def top_rows(guild_id: int, limit: int = 10) -> list[sqlite3.Row]:
